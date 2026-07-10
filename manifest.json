@@ -5,17 +5,19 @@
   "main": "code.js",
   "editorType": ["figma"],
   "menu": [
-    { "name": "Bake Mask Groups", "command": "bake-mask-groups" }
-  ],
-  "parameters": [
     {
-      "name": "Export scale (1x-4x, default 2x)",
-      "key": "scale",
-      "description": "Resolution multiplier used when rasterizing each masked group",
-      "optional": true
+      "name": "Bake Mask Groups",
+      "command": "bake-mask-groups",
+      "parameters": [
+        {
+          "name": "Export scale (1x-4x, default 2x)",
+          "key": "scale",
+          "description": "Resolution multiplier used when rasterizing each masked group",
+          "optional": true
+        }
+      ]
     }
   ],
-  "parameterOnly": false,
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": ["none"]
