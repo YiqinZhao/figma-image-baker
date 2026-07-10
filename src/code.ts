@@ -5,7 +5,16 @@
 // them from the main component in surprising ways.
 const BAKEABLE_TYPES = new Set<NodeType>(["GROUP", "FRAME", "BOOLEAN_OPERATION", "SECTION"]);
 
+// Figma's exportAsync rejects SCALE constraint values outside this range.
+const MIN_EXPORT_SCALE = 0.01;
+const MAX_EXPORT_SCALE = 4;
+
+// Used when a masked group contains no raster image fill at all (pure vector
+// content), since there's no "native resolution" to match in that case.
+const FALLBACK_SCALE = 2;
+
 type Bakeable = SceneNode & ChildrenMixin;
+type ImageFillNode = SceneNode & LayoutMixin & MinimalFillsMixin;
 
 function hasMaskChild(node: ChildrenMixin): boolean {
   return node.children.some((c) => "isMask" in c && (c as MinimalFillsMixin & { isMask?: boolean }).isMask === true);
@@ -44,7 +53,69 @@ function findMaskContainers(root: BaseNode): Bakeable[] {
   return results;
 }
 
-async function bakeContainer(node: Bakeable, scale: number): Promise<void> {
+function collectImageFills(root: BaseNode): { node: ImageFillNode; paint: ImagePaint }[] {
+  const found: { node: ImageFillNode; paint: ImagePaint }[] = [];
+
+  function visit(node: BaseNode): void {
+    if ("fills" in node) {
+      const fills = (node as MinimalFillsMixin).fills;
+      if (Array.isArray(fills)) {
+        for (const paint of fills) {
+          if (paint.type === "IMAGE" && paint.imageHash) {
+            found.push({ node: node as ImageFillNode, paint });
+          }
+        }
+      }
+    }
+    if ("children" in node) {
+      for (const child of (node as ChildrenMixin).children) visit(child);
+    }
+  }
+
+  visit(root);
+  return found;
+}
+
+/**
+ * Figures out what export scale would reproduce each image fill's native
+ * pixel resolution, and returns the largest one found (so a container mixing
+ * a hi-res photo with a small icon still samples the photo at full density).
+ * For CROP-mode fills, factors in imageTransform's scale so a tight crop of a
+ * large source image is recognized as needing higher density, not lower.
+ */
+async function computeNativeScale(container: Bakeable): Promise<number> {
+  const imageFills = collectImageFills(container);
+  if (imageFills.length === 0) return FALLBACK_SCALE;
+
+  let maxRatio = 0;
+
+  for (const { node, paint } of imageFills) {
+    if (!paint.imageHash) continue;
+    const image = figma.getImageByHash(paint.imageHash);
+    if (!image) continue;
+
+    try {
+      const { width: nativeW, height: nativeH } = await image.getSizeAsync();
+      let effW = nativeW;
+      let effH = nativeH;
+
+      if (paint.scaleMode === "CROP" && paint.imageTransform) {
+        effW = nativeW * Math.abs(paint.imageTransform[0][0]);
+        effH = nativeH * Math.abs(paint.imageTransform[1][1]);
+      }
+
+      if (node.width > 0 && node.height > 0) {
+        maxRatio = Math.max(maxRatio, effW / node.width, effH / node.height);
+      }
+    } catch (err) {
+      console.warn(`figma-image-baker: couldn't read native size for a fill in "${container.name}"`, err);
+    }
+  }
+
+  return maxRatio > 0 ? maxRatio : FALLBACK_SCALE;
+}
+
+async function bakeContainer(node: Bakeable, userMultiplier: number): Promise<{ clamped: boolean }> {
   const parent = node.parent;
   if (!parent || !("insertChild" in parent)) {
     throw new Error(`"${node.name}" has no editable parent`);
@@ -52,6 +123,11 @@ async function bakeContainer(node: Bakeable, scale: number): Promise<void> {
 
   const index = parent.children.indexOf(node);
   const { width, height, name, relativeTransform } = node;
+
+  const nativeScale = await computeNativeScale(node);
+  const requestedScale = nativeScale * userMultiplier;
+  const scale = Math.min(Math.max(requestedScale, MIN_EXPORT_SCALE), MAX_EXPORT_SCALE);
+  const clamped = requestedScale > MAX_EXPORT_SCALE;
 
   const bytes = await node.exportAsync({
     format: "PNG",
@@ -70,18 +146,20 @@ async function bakeContainer(node: Bakeable, scale: number): Promise<void> {
   // never briefly empty (an empty Group node auto-deletes itself in Figma).
   (parent as unknown as ChildrenMixin & { insertChild(i: number, n: SceneNode): void }).insertChild(index, rect);
   node.remove();
+
+  return { clamped };
 }
 
-function parseScale(raw: string | undefined): number {
+function parseMultiplier(raw: string | undefined): number {
   const n = raw ? parseFloat(raw) : NaN;
-  if (!Number.isFinite(n) || n <= 0) return 2;
-  return Math.min(Math.max(n, 1), 4);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return n;
 }
 
 figma.parameters.on("input", ({ key, query, result }) => {
   if (key === "scale") {
-    const suggestions = ["1", "2", "3", "4"].filter((s) => s.startsWith(query));
-    result.setSuggestions(suggestions.length > 0 ? suggestions : ["2"]);
+    const suggestions = ["1", "0.5", "2", "4"].filter((s) => s.startsWith(query));
+    result.setSuggestions(suggestions.length > 0 ? suggestions : ["1"]);
   }
 });
 
@@ -91,7 +169,7 @@ figma.on("run", async ({ command, parameters }: RunEvent) => {
     return;
   }
 
-  const scale = parseScale(parameters?.scale as string | undefined);
+  const multiplier = parseMultiplier(parameters?.scale as string | undefined);
   const selection = figma.currentPage.selection;
 
   if (selection.length === 0) {
@@ -113,18 +191,22 @@ figma.on("run", async ({ command, parameters }: RunEvent) => {
 
   let baked = 0;
   let failed = 0;
+  let clampedCount = 0;
 
   for (const container of containers) {
     try {
-      await bakeContainer(container, scale);
+      const { clamped } = await bakeContainer(container, multiplier);
       baked++;
+      if (clamped) clampedCount++;
     } catch (err) {
       failed++;
       console.error(`figma-image-baker: failed to bake "${container.name}"`, err);
     }
   }
 
-  const summary = failed > 0 ? `Baked ${baked} mask group(s), ${failed} failed (see console).` : `Baked ${baked} mask group(s).`;
-  figma.notify(summary);
+  const parts = [`Baked ${baked} mask group(s)`];
+  if (clampedCount > 0) parts.push(`${clampedCount} hit Figma's 4x export cap (source is higher-res than that)`);
+  if (failed > 0) parts.push(`${failed} failed (see console)`);
+  figma.notify(parts.join(", ") + ".");
   figma.closePlugin();
 });

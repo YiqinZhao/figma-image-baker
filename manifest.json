@@ -10,9 +10,9 @@
       "command": "bake-mask-groups",
       "parameters": [
         {
-          "name": "Export scale (1x-4x, default 2x)",
+          "name": "Extra multiplier on native resolution (default 1x)",
           "key": "scale",
-          "description": "Resolution multiplier used when rasterizing each masked group",
+          "description": "Applied on top of each image's own source resolution, capped at Figma's 4x export limit",
           "optional": true
         }
       ]

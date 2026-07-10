@@ -36,11 +36,28 @@ Run `npm run watch` while developing to rebuild `code.js` on save.
 1. Select a frame (or group) containing one or more masked images.
 2. Right-click → **Plugins → Image Baker → Bake Mask Groups** (or find it via
    Quick Actions).
-3. It'll prompt for an export scale (1x–4x, defaults to 2x) — pick something
-   at least as high as the resolution you want the baked images to have,
-   since this step fixes their pixel dimensions.
+3. It'll prompt for an optional multiplier (default 1x). Leave it blank and
+   each image is baked at its own **native source resolution** — e.g. a
+   1024×1024 image cropped down to a 768×768 view bakes out at 768×768, not
+   at whatever tiny size it happens to be displayed on the canvas. Bump the
+   multiplier above 1 for extra headroom, or below 1 to intentionally
+   downsample. Figma caps any single export at 4x the on-canvas size, so if a
+   source image is scaled down enormously on the canvas, native resolution
+   may not be fully reachable in one pass — the plugin tells you if a bake
+   hit that ceiling.
 4. Each mask group in the selection gets replaced by a flat image node.
    `Cmd/Ctrl+Z` undoes the whole run in one step if you don't like the result.
+
+## How the resolution is picked
+
+For each masked group, the plugin looks at every image fill inside it, reads
+the fill's *native* pixel dimensions via the Figma API, and compares that to
+how large the fill is actually drawn on the canvas. The largest ratio found
+(accounting for `CROP`-mode fills, where `imageTransform` means only part of
+the source image is visible) becomes that group's export scale, so the baked
+PNG matches the highest-resolution source image involved rather than the
+group's on-screen size. If a masked group has no raster fill at all (pure
+vector content), it falls back to a flat 2x.
 
 ## How it decides what to bake
 
