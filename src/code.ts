@@ -29,35 +29,6 @@ function isBakeable(node: BaseNode): node is Bakeable {
   return BAKEABLE_TYPES.has(node.type as NodeType) && "children" in node;
 }
 
-/**
- * Walk the subtree under `root` and collect every container whose direct
- * children include a mask layer. We deliberately stop descending once we
- * find one — baking the whole container captures any masks nested inside it
- * too, since exportAsync renders final composited pixels, not raw geometry.
- * The root itself is never baked, even if it directly contains a mask,
- * so selecting a big frame doesn't flatten the entire frame into one image.
- */
-function findMaskContainers(root: BaseNode): Bakeable[] {
-  const results: Bakeable[] = [];
-
-  function visit(node: BaseNode, isRoot: boolean): void {
-    if (!("children" in node)) return;
-    const container = node as ChildrenMixin;
-
-    if (!isRoot && isBakeable(node) && hasMaskChild(container)) {
-      results.push(node);
-      return;
-    }
-
-    for (const child of container.children) {
-      visit(child, false);
-    }
-  }
-
-  visit(root, true);
-  return results;
-}
-
 function collectImageFills(root: BaseNode): { node: ImageFillNode; paint: ImagePaint }[] {
   const found: { node: ImageFillNode; paint: ImagePaint }[] = [];
 
@@ -79,6 +50,75 @@ function collectImageFills(root: BaseNode): { node: ImageFillNode; paint: ImageP
 
   visit(root);
   return found;
+}
+
+/**
+ * True for a frame that has "Clip content" on AND is actually clipping
+ * something (a child's render bounds spill outside the frame) AND contains
+ * a raster image. That last condition matters: a clipped frame of pure
+ * vector content exports as a plain PDF clip path (`W n`), which is robust
+ * on its own — it's specifically clipping *raster* content where Figma's
+ * exporter reaches for the same fragile soft-mask/Group construct that
+ * explicit "Use as Mask" layers use.
+ */
+function clipsRasterWithOverflow(node: BaseNode): boolean {
+  if (!("clipsContent" in node)) return false;
+  const frame = node as FrameNode;
+  if (!frame.clipsContent || frame.children.length === 0) return false;
+
+  const bounds = frame.absoluteBoundingBox;
+  if (!bounds) return false;
+
+  const EPS = 0.5;
+  const overflows = frame.children.some((child) => {
+    const renderBounds = "absoluteRenderBounds" in child ? (child as LayoutMixin).absoluteRenderBounds : null;
+    const cb = renderBounds ?? child.absoluteBoundingBox;
+    if (!cb) return false;
+    return (
+      cb.x < bounds.x - EPS ||
+      cb.y < bounds.y - EPS ||
+      cb.x + cb.width > bounds.x + bounds.width + EPS ||
+      cb.y + cb.height > bounds.y + bounds.height + EPS
+    );
+  });
+  if (!overflows) return false;
+
+  return collectImageFills(frame).length > 0;
+}
+
+function needsBaking(node: BaseNode): node is Bakeable {
+  if (!isBakeable(node)) return false;
+  return hasMaskChild(node) || clipsRasterWithOverflow(node);
+}
+
+/**
+ * Walk the subtree under `root` and collect every container that needs
+ * baking — either an explicit mask group, or a clipped frame with
+ * overflowing raster content (see needsBaking). We deliberately stop
+ * descending once we find one — baking the whole container captures
+ * anything nested inside it too, since exportAsync renders final
+ * composited pixels, not raw geometry. The root itself is never baked,
+ * even if it directly qualifies, so selecting a big frame doesn't flatten
+ * the entire frame into one image.
+ */
+function findBakeTargets(root: BaseNode): Bakeable[] {
+  const results: Bakeable[] = [];
+
+  function visit(node: BaseNode, isRoot: boolean): void {
+    if (!("children" in node)) return;
+
+    if (!isRoot && needsBaking(node)) {
+      results.push(node);
+      return;
+    }
+
+    for (const child of (node as ChildrenMixin).children) {
+      visit(child, false);
+    }
+  }
+
+  visit(root, true);
+  return results;
 }
 
 /**
@@ -192,11 +232,11 @@ figma.on("run", async ({ command, parameters }: RunEvent) => {
 
   const containers: Bakeable[] = [];
   for (const sel of selection) {
-    containers.push(...findMaskContainers(sel));
+    containers.push(...findBakeTargets(sel));
   }
 
   if (containers.length === 0) {
-    figma.notify("No mask groups found in the selection.");
+    figma.notify("No mask groups or clipped-image frames found in the selection.");
     figma.closePlugin();
     return;
   }
@@ -216,7 +256,7 @@ figma.on("run", async ({ command, parameters }: RunEvent) => {
     }
   }
 
-  const parts = [`Baked ${baked} mask group(s)`];
+  const parts = [`Baked ${baked} group(s)`];
   if (clampedCount > 0) parts.push(`${clampedCount} hit Figma's 4096px export ceiling (source is higher-res than that)`);
   if (failed > 0) parts.push(`${failed} failed (see console)`);
   figma.notify(parts.join(", ") + ".");

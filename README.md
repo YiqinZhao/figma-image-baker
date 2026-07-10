@@ -1,23 +1,32 @@
 # figma-image-baker
 
-A Figma plugin that finds every mask group inside your selection and bakes
-each one into a single flat image, replacing the mask + masked layers with
-one plain image node in the same position/size.
+A Figma plugin that finds every mask group and clipped-image frame inside
+your selection and bakes each one into a single flat image, replacing the
+mask/clip construct with one plain image node in the same position/size.
 
 ## Why
 
-Figma's PDF exporter implements clipping/masking (frame "Clip content" or an
-explicit "Use as Mask" layer) using PDF soft-mask (`ExtGState` + transparency
-`Group`) constructs, even for plain rectangular crops. Some PDF pipelines
-(notably arXiv's LaTeX-recompilation step) drop the `/Group` dictionary those
-soft masks depend on when they merge/optimize included PDFs, which makes the
+Figma's PDF exporter implements clipping/masking — both an explicit "Use as
+Mask" layer *and* a plain frame with "Clip content" toggled on over raster
+content — using PDF soft-mask (`ExtGState` + transparency `Group`)
+constructs, even for plain rectangular crops. Some PDF pipelines (notably
+arXiv's LaTeX-recompilation step) drop the `/Group` dictionary those soft
+masks depend on when they merge/optimize included PDFs, which makes the
 masked content render as fully transparent on macOS's Quartz/PDFKit renderer
 (Safari, Preview, Quick Look) — even though it looks fine everywhere else.
 
-Baking the mask into the image's own pixels removes the dependency on that
-soft-mask machinery entirely: the exported PDF just contains a plain image
-XObject, which every renderer handles the same way. Text layers you don't
-select are untouched, so labels/captions stay selectable.
+Baking the mask/clip into the image's own pixels removes the dependency on
+that soft-mask machinery entirely: the exported PDF just contains a plain
+image XObject, which every renderer handles the same way. Text layers you
+don't select are untouched, so labels/captions stay selectable.
+
+Constructs this *doesn't* need to touch, because they're already robust PDF
+features on their own: gradients (standard shading patterns), vector boolean
+operations, single-layer opacity with no overlapping siblings (native
+constant-alpha, no group needed), and drop shadows/blurs (Figma rasterizes
+these itself already). Non-`NORMAL` blend modes (Multiply, Screen, etc.) rely
+on the same fragile `Group`/`ExtGState` machinery too, but aren't auto-baked
+yet — flag it if you hit one in practice.
 
 ## Setup
 
@@ -51,27 +60,35 @@ Run `npm run watch` while developing to rebuild `code.js` on save.
 
 ## How the resolution is picked
 
-For each masked group, the plugin looks at every image fill inside it, reads
+For each bake target, the plugin looks at every image fill inside it, reads
 the fill's *native* pixel dimensions via the Figma API, and compares that to
 how large the fill is actually drawn on the canvas. The largest ratio found
 (accounting for `CROP`-mode fills, where `imageTransform` means only part of
 the source image is visible) becomes that group's export scale, so the baked
 PNG matches the highest-resolution source image involved rather than the
-group's on-screen size. If a masked group has no raster fill at all (pure
+group's on-screen size. If a bake target has no raster fill at all (pure
 vector content), it falls back to a flat 2x.
 
 ## How it decides what to bake
 
-It walks the selection's descendants looking for any Group/Frame/Boolean
-container whose direct children include a layer with `isMask` set. Once
-found, it stops descending into that container — exporting it captures
-whatever's visually composited inside, including any masks nested further
-in — and exports the whole thing as PNG, then swaps it in for the original
-mask construct.
+It walks the selection's descendants looking for either of two things:
 
-The selection itself is never baked outright even if it directly contains a
-mask, so running this on a large frame only flattens the individual masked
-sub-groups inside it, not the whole frame.
+- Any Group/Frame/Boolean/Section container whose direct children include a
+  layer with `isMask` set (an explicit "Use as Mask").
+- Any Frame with "Clip content" on, where at least one child's render bounds
+  actually spill outside the frame (so it's really clipping something, not
+  just toggled on unused) *and* it contains a raster image fill somewhere
+  inside. Pure-vector clipped frames are left alone since a plain PDF clip
+  path handles those fine on its own.
+
+Once a container matches either condition, it stops descending into it —
+exporting captures whatever's visually composited inside, including anything
+nested further in — and exports the whole thing as PNG, then swaps it in for
+the original mask/clip construct.
+
+The selection itself is never baked outright even if it directly qualifies,
+so running this on a large frame only flattens the individual sub-groups
+inside it, not the whole frame.
 
 Component instances are skipped on purpose — replacing their internals could
 desync them from the main component in surprising ways. If you need one
