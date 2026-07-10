@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["ES2017"],
+    "strict": true,
+    "noEmit": true,
+    "moduleResolution": "node",
+    "typeRoots": ["./node_modules/@figma"]
+  },
+  "include": ["src/**/*.ts"]
+}

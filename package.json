@@ -1,0 +1,14 @@
+{
+  "name": "figma-image-baker",
+  "version": "1.0.0",
+  "description": "Figma plugin: bake mask groups into flat images, replacing soft-mask constructs that break in some PDF renderers.",
+  "scripts": {
+    "build": "esbuild src/code.ts --bundle --outfile=code.js --target=es2017",
+    "watch": "npm run build -- --watch"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.90.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  }
+}
