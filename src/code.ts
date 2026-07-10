@@ -5,9 +5,14 @@
 // them from the main component in surprising ways.
 const BAKEABLE_TYPES = new Set<NodeType>(["GROUP", "FRAME", "BOOLEAN_OPERATION", "SECTION"]);
 
-// Figma's exportAsync rejects SCALE constraint values outside this range.
+// Figma won't accept a non-positive scale.
 const MIN_EXPORT_SCALE = 0.01;
-const MAX_EXPORT_SCALE = 4;
+
+// Figma silently downscales any exported image so neither pixel dimension
+// exceeds this, regardless of the requested SCALE value. There's no fixed
+// "max scale" — the effective ceiling depends on the node's on-canvas size,
+// so this is applied per-container in computeExportScale, not as a flat cap.
+const FIGMA_MAX_EXPORT_DIMENSION_PX = 4096;
 
 // Used when a masked group contains no raster image fill at all (pure vector
 // content), since there's no "native resolution" to match in that case.
@@ -126,8 +131,15 @@ async function bakeContainer(node: Bakeable, userMultiplier: number): Promise<{ 
 
   const nativeScale = await computeNativeScale(node);
   const requestedScale = nativeScale * userMultiplier;
-  const scale = Math.min(Math.max(requestedScale, MIN_EXPORT_SCALE), MAX_EXPORT_SCALE);
-  const clamped = requestedScale > MAX_EXPORT_SCALE;
+
+  // The real ceiling is "output pixels per side <= 4096", not a flat scale
+  // multiplier — a small on-canvas group has far more scale headroom than a
+  // large one before it gets there.
+  const maxDim = Math.max(width, height);
+  const dimensionCeiling = maxDim > 0 ? FIGMA_MAX_EXPORT_DIMENSION_PX / maxDim : requestedScale;
+
+  const scale = Math.min(Math.max(requestedScale, MIN_EXPORT_SCALE), dimensionCeiling);
+  const clamped = requestedScale > dimensionCeiling;
 
   const bytes = await node.exportAsync({
     format: "PNG",
@@ -205,7 +217,7 @@ figma.on("run", async ({ command, parameters }: RunEvent) => {
   }
 
   const parts = [`Baked ${baked} mask group(s)`];
-  if (clampedCount > 0) parts.push(`${clampedCount} hit Figma's 4x export cap (source is higher-res than that)`);
+  if (clampedCount > 0) parts.push(`${clampedCount} hit Figma's 4096px export ceiling (source is higher-res than that)`);
   if (failed > 0) parts.push(`${failed} failed (see console)`);
   figma.notify(parts.join(", ") + ".");
   figma.closePlugin();

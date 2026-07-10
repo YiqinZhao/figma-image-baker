@@ -41,10 +41,11 @@ Run `npm run watch` while developing to rebuild `code.js` on save.
    1024×1024 image cropped down to a 768×768 view bakes out at 768×768, not
    at whatever tiny size it happens to be displayed on the canvas. Bump the
    multiplier above 1 for extra headroom, or below 1 to intentionally
-   downsample. Figma caps any single export at 4x the on-canvas size, so if a
-   source image is scaled down enormously on the canvas, native resolution
-   may not be fully reachable in one pass — the plugin tells you if a bake
-   hit that ceiling.
+   downsample. Figma caps any single exported image at 4096px on its longest
+   side (silently downscaling if you ask for more) — there's no fixed "max
+   scale", the effective ceiling just depends on how large the masked group
+   is on the canvas. If a bake would exceed it, the plugin computes the
+   largest scale that still fits and tells you it hit that ceiling.
 4. Each mask group in the selection gets replaced by a flat image node.
    `Cmd/Ctrl+Z` undoes the whole run in one step if you don't like the result.
 

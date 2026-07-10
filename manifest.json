@@ -12,7 +12,7 @@
         {
           "name": "Extra multiplier on native resolution (default 1x)",
           "key": "scale",
-          "description": "Applied on top of each image's own source resolution, capped at Figma's 4x export limit",
+          "description": "Applied on top of each image's own source resolution, capped by Figma's 4096px-per-side export ceiling",
           "optional": true
         }
       ]
